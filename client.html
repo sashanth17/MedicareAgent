@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Pharmacy Chatbot</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 20px; }
+    #messages { border: 1px solid #ccc; height: 300px; padding: 10px; overflow-y: auto; }
+    input { width: 80%; padding: 10px; }
+    button { padding: 10px; }
+  </style>
+</head>
+<body>
+<h2>💊 Smart Pharmacy Chatbot</h2>
+
+<div id="messages"></div>
+<br>
+<input id="messageInput" placeholder="Ask something...">
+<button onclick="sendMessage()">Send</button>
+
+<script>
+  let ws = new WebSocket("ws://localhost:8001/ws");
+
+  ws.onopen = () => appendMessage("🟢 Connected to server");
+
+  ws.onmessage = (event) => {
+  if (event.data === "<<END>>") {
+    console.log("Streaming completed");
+  } else {
+    appendMessage("Bot: " + event.data);
+  }
+};
+
+  ws.onclose = () => appendMessage("🔴 Disconnected");
+
+  function sendMessage() {
+    const input = document.getElementById("messageInput");
+    ws.send(input.value);
+    appendMessage("You: " + input.value);
+    input.value = "";
+  }
+
+  function appendMessage(msg) {
+    const box = document.getElementById("messages");
+    box.innerHTML += `<div>${msg}</div>`;
+    box.scrollTop = box.scrollHeight;
+  }
+</script>
+</body>
+</html>
