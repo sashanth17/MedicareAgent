@@ -1,6 +1,7 @@
 from dotenv import load_dotenv
 from crewai import LLM, Agent, Crew, Task
 from tools.medicine import medicine_tool
+
 load_dotenv()
 
 llm = LLM(
@@ -10,18 +11,49 @@ llm = LLM(
 
 agent = Agent(
     llm=llm,
-    role="Smart Pharmacy Assistant",
-    goal="Understand the user query: {query}. Detect if they are asking for medicine availability and call the tool only if needed.",
-    backstory="Helpful pharmacy AI chatbot.",
+    role="Strict Smart Pharmacy Assistant",
+    goal=(
+        "You must answer user queries about medicines and pharmacies with HIGH PRECISION. "
+        "If the user asks about medicine availability, you MUST call the `medicine_tool` "
+        "and then return ONLY the tool's output to the user, with NO extra pharmacies, "
+        "NO invented data, and NO modifications to the tool response. "
+        "If the user is NOT asking about availability, answer politely without calling the tool."
+    ),
+    backstory=(
+        "You are a helpful pharmacy AI chatbot that must NEVER fabricate medicine or pharmacy data. "
+        "When you use tools, you strictly trust and forward their responses without adding or changing "
+        "pharmacy names, locations, or contact numbers."
+    ),
     tools=[medicine_tool],
-    max_iter=3  # Prevent long loops
+    max_iter=3,
+    allow_delegation=False
 )
 
 task = Task(
-    description="Respond politely and make sure to address the user query: {query}. Call the medicine_tool only if they ask about availability.",
-    expected_output="Natural conversational streaming output that responds directly to the query.",
+    description=(
+        "You are chatting with a user. Their message is: {query}\n\n"
+        "1. First, decide if the user is asking about MEDICINE AVAILABILITY (for example: "
+        "'search paracetomal', 'is paracetamol available', 'where can I buy dolo 650', etc.).\n"
+        "2. If the user is asking about availability, you MUST:\n"
+        "   - Call `medicine_tool` exactly once with the medicine name.\n"
+        "   - Then respond to the user with ONLY the exact string returned by the tool.\n"
+        "   - Do NOT summarize, rephrase, re-order, or add ANY extra pharmacies.\n"
+        "   - Do NOT hallucinate or guess any data. If the tool returns 2 pharmacies, "
+        "     you MUST show exactly those 2 and nothing more.\n"
+        "3. If the user is NOT asking about availability, DO NOT call `medicine_tool`. "
+        "   Just answer briefly and politely based on your general knowledge.\n"
+        "4. You are STRICTLY FORBIDDEN from inventing any pharmacy name, location, or contact number."
+    ),
+    expected_output=(
+        "If `medicine_tool` was called:\n"
+        "- The final output MUST be EXACTLY the string returned by `medicine_tool`, "
+        "with no additional pharmacies, no fabricated data, and no extra explanation.\n\n"
+        "If `medicine_tool` was NOT called:\n"
+        "- A short, polite natural-language reply to the user query.\n"
+    ),
     agent=agent
 )
+
 embedder_config = {
     "provider": "google-generativeai",
     "config": {
@@ -29,6 +61,7 @@ embedder_config = {
         "task_type": "retrieval_document"
     }
 }
+
 crew = Crew(
     agents=[agent],
     tasks=[task],
@@ -40,6 +73,7 @@ crew = Crew(
 print("\n=== Smart Pharmacy Chatbot ===")
 print("Type 'exit' to quit\n")
 crew.reset_memories(command_type='short')
+
 while True:
     query = input("You: ")
     if query.lower() == "exit":

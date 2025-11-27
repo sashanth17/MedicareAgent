@@ -6,7 +6,7 @@ def medicine_tool(medicine_name: str) -> str:
     """Fetches medicine availability from backend API"""
     try:
         response = requests.get(
-            f'https://127.0.0.1:8000/medicines/name/{medicine_name}/',
+            f'https://172.16.63.49:8000/medicines/name/{medicine_name}/',
             verify=False  
         )
 
