@@ -4,81 +4,68 @@ from tools.medicine import medicine_tool
 # Initialize LLM
 llm = LLM(
     model="gemini/gemini-2.0-flash",
-    temperature=0.0  # deterministic responses
+    temperature=0.0  # Deterministic for consistency
 )
 
 class CrewInit:
     @staticmethod
     def create_crew():
         """
-        Create a Crew instance per connection.
-        Ensures per-client memory isolation and strict user-facing responses.
+        Creates a Crew instance with strict formatting rules.
         """
 
         # ----------------- AGENT -----------------
         agent = Agent(
             llm=llm,
             role="Smart Pharmacy Assistant",
-            goal=(
-        "You must answer user queries about medicines and pharmacies with HIGH PRECISION. "
-        "If the user asks about medicine availability, you MUST call the `medicine_tool` "
-        "and then return ONLY the tool's output to the user, with NO extra pharmacies, "
-        "NO invented data, and NO modifications to the tool response. "
-        "If the user is NOT asking about availability, answer politely without calling the tool."
-            ),
+            goal="Provide accurate pharmacy information strictly based on tool outputs.",
             backstory=(
-        "You are a helpful pharmacy AI chatbot that must NEVER fabricate medicine or pharmacy data. "
-        "When you use tools, you strictly trust and forward their responses without adding or changing "
-        "pharmacy names, locations, or contact numbers."
-    ),
+                "You are a precise AI assistant for a pharmacy system. "
+                "You value accuracy above all else. "
+                "You never add pleasantries or filler text before the final answer."
+            ),
             tools=[medicine_tool],
-            max_iter=2,
-            verbose=False,
-            show_thoughts=False  # suppress chain-of-thought and internal actions
+            max_iter=3,
+            verbose=False, # Keep false to reduce noise, though stream=True overrides this often
+            allow_delegation=False
         )
 
         # ----------------- TASK -----------------
         task = Task(
             description=(
-        "You are chatting with a user. Their message is: {query}\n\n"
-        "1. First, decide if the user is asking about MEDICINE AVAILABILITY (for example: "
-        "'search paracetomal', 'is paracetamol available', 'where can I buy dolo 650', etc.).\n"
-        "2. If the user is asking about availability, you MUST:\n"
-        "   - Call `medicine_tool` exactly once with the medicine name.\n"
-        "   - Then respond to the user with ONLY the exact string returned by the tool.\n"
-        "   - Do NOT summarize, rephrase, re-order, or add ANY extra pharmacies.\n"
-        "   - Do NOT hallucinate or guess any data. If the tool returns 2 pharmacies, "
-        "     you MUST show exactly those 2 and nothing more.\n"
-        "3. If the user is NOT asking about availability, DO NOT call `medicine_tool`. "
-        "   Just answer briefly and politely based on your general knowledge.\n"
-        "4. You are STRICTLY FORBIDDEN from inventing any pharmacy name, location, or contact number."
-    ),
-    expected_output=(
-        "If `medicine_tool` was called:\n"
-        "- The final output MUST be EXACTLY the string returned by `medicine_tool`, "
-        "with no additional pharmacies, no fabricated data, and no extra explanation.\n\n"
-        "If `medicine_tool` was NOT called:\n"
-        "- A short, polite natural-language reply to the user query.\n"
-    ),
+                f"User Query: '{{query}}'\n\n"
+                "STEPS:\n"
+                "1. Analyze if the user is asking for medicine availability.\n"
+                "2. IF YES: Use 'medicine_tool' with the medicine name.\n"
+                "3. IF NO: Answer general questions politely without tools.\n\n"
+                "CRITICAL OUTPUT RULES:\n"
+                "- You MUST start your final response to the user with 'Final Answer:'.\n"
+                "- If the tool finds a pharmacy, your Final Answer must be a complete sentence containing the Name, Location, and Phone.\n"
+                "- If the tool returns nothing, state that clearly.\n"
+                "- DO NOT include 'Thought:', 'Action:', or raw JSON in your Final Answer."
+            ),
+            expected_output=(
+                "A clear, natural language sentence starting after 'Final Answer:'. "
+                "Example: 'Final Answer: Paracetamol is available at Shane Pharma in Coimbatore, contact 143249494.'"
+            ),
             agent=agent
         )
 
-        # ----------------- EMBEDDER -----------------
-        embedder_config = {
-            "provider": "google-generativeai",
-            "config": {
-                "model": "gemini-embedding-001",
-                "task_type": "retrieval_document"
-            }
-        }
-
         # ----------------- CREW -----------------
+        # Note: memory=True appends the JSON reflection block. 
+        # Our server.py is now equipped to strip this out automatically.
         crew = Crew(
             agents=[agent],
             tasks=[task],
-            stream=True,
-            memory=True,
-            embedder=embedder_config
+            stream=True, 
+            memory=True, 
+            embedder={
+                "provider": "google-generativeai",
+                "config": {
+                    "model": "gemini-embedding-001",
+                    "task_type": "retrieval_document"
+                }
+            }
         )
 
         return crew

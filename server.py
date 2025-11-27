@@ -1,141 +1,123 @@
 import asyncio
 import threading
+import re
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 import urllib3
 
-# optional: silence InsecureRequestWarning for local dev (only for dev)
+# Silence InsecureRequestWarning
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from crew import CrewInit
+
 load_dotenv()
 app = FastAPI()
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Allow all HTTP methods
-    allow_headers=["*"],  # Allow all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-from utils import websocket_stream_worker
+class CrewStreamParser:
+    """
+    Advanced Parser to handle fragmented streaming tokens.
+    It buffers the stream to detect the 'Final Answer' start
+    and strictly cuts off the stream BEFORE the 'suggestions' JSON block starts.
+    """
+    def __init__(self):
+        self.buffer = ""
+        self.streaming_active = False # Have we found "Final Answer"?
+        self.finished = False         # Have we hit the JSON block?
+        
+        # Pattern to find the start of the answer
+        self.start_pattern = re.compile(r"(Final Answer\s*:|Final Answer\s*|Answer\s*:)\s*", re.IGNORECASE)
+        
+        # Pattern to detect the START of the memory/suggestion block.
+        # It handles newlines and spaces between { and "suggestions"
+        # Matches: { "suggestions" OR { "quality" OR { "entities"
+        self.stop_pattern = re.compile(r'\{\s*"\s*(suggestions|quality|entities)', re.DOTALL)
+
+    def process_chunk(self, chunk: str) -> str:
+        """
+        Input: Raw chunk from CrewAI
+        Output: Clean text to send to user (or empty string if buffering)
+        """
+        if self.finished:
+            return ""
+
+        # 1. Clean artifacts
+        # Remove "Bot:", "TEXT_CHUNK:", etc.
+        clean_chunk = chunk
+        for prefix in ["Bot:", "TEXT_CHUNK:", "User:", "You:"]:
+            if prefix in clean_chunk:
+                clean_chunk = clean_chunk.replace(prefix, "")
+        
+        self.buffer += clean_chunk
+
+        # 2. PHASE 1: Waiting for "Final Answer"
+        if not self.streaming_active:
+            match = self.start_pattern.search(self.buffer)
+            if match:
+                self.streaming_active = True
+                # Discard the prefix "Final Answer:", keep the rest
+                self.buffer = self.buffer[match.end():]
+            else:
+                # Fallback: If buffer gets huge (>400 chars) without "Final Answer", 
+                # but also without "Action:", assume it's small talk and force start.
+                if len(self.buffer) > 400 and "Action:" not in self.buffer:
+                     self.streaming_active = True
+
+        # 3. PHASE 2: Streaming content (with JSON protection)
+        output_text = ""
+        if self.streaming_active:
+            # Check if the STOP pattern is fully present
+            stop_match = self.stop_pattern.search(self.buffer)
+            
+            if stop_match:
+                # FOUND IT! The JSON block has started.
+                # Return everything UP TO the start of the match (the '{')
+                self.finished = True
+                cutoff_index = stop_match.start()
+                output_text = self.buffer[:cutoff_index]
+                self.buffer = "" # clear buffer, we are done
+                return output_text.strip()
+            
+            # EDGE CASE: The Buffer might end with half a token like '{' or '{ "'
+            # We must NOT send this yet, because the next chunk might be 'suggestions":'
+            
+            # Find the last open brace
+            last_brace_index = self.buffer.rfind('{')
+            
+            if last_brace_index != -1:
+                # If there is a brace, check if it's "suspiciously" close to the end
+                # (i.e. we are waiting for the rest of the JSON key)
+                suspicious_length = len(self.buffer) - last_brace_index
+                if suspicious_length < 50: 
+                    # Hold back text from the brace onwards
+                    # Send everything before the brace
+                    output_text = self.buffer[:last_brace_index]
+                    self.buffer = self.buffer[last_brace_index:] # Keep the suspicious part in buffer
+                    return output_text
+            
+            # If no suspicious braces, flush the whole buffer
+            output_text = self.buffer
+            self.buffer = ""
+            
+        return output_text
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    import re
-    import time
-
     await websocket.accept()
+    
     crew = CrewInit().create_crew()
     loop = asyncio.get_running_loop()
-
-    FINAL_RE = re.compile(r"final answer\s*:\s*", re.IGNORECASE)
-    JSON_LIKELY_RE = re.compile(r'"\s*:\s*')   # `"key":` indicates JSON-like
-    CHUNK_NUMBER_RE = re.compile(r"chunk\d+", re.IGNORECASE)
-
-    # Phrases that indicate internal evaluator suggestions / instructions
-    SUGGESTION_PATTERNS = [
-        r"\bthe model should\b",
-        r"\bthe model must\b",
-        r"\bshould ensure\b",
-        r"\bshould avoid\b",
-        r"\bavoid adding\b",
-        r"\bensure that\b",
-        r"\binclude examples\b",
-        r"\badd test cases\b",
-        r"\bexplicitly state\b",
-        r"\bthe tool's output\b",
-        r"\bsuggestions\b",
-        r"\bquality\b",
-        r"\bentities\b",
-        r"\bimprove its ability\b",
-        r"\bthe model should improve\b",
-        r"\bthe model should avoid\b",
-        r"\bthe model should ensure\b",
-        r"\boutputting the exact string\b",
-        r"\bthe model should not\b",
-        r"\binstruction\b",
-    ]
-    SUGGESTION_RE = re.compile("|".join(SUGGESTION_PATTERNS), re.IGNORECASE)
-
-    # Reused reasoning detection
-    REASONING_PATTERNS = [
-        r"\bthe user\b",
-        r"\bi should\b",
-        r"\btherefore\b",
-        r"\bthought\b",
-        r"\baction\b",
-        r"\baction input\b",
-    ]
-    REASONING_RE = re.compile("|".join(REASONING_PATTERNS), re.IGNORECASE)
-
-    def sanitize_chunk(text: str) -> str:
-        """Normalize and remove chunk artifacts and prefixes."""
-        if not text:
-            return ""
-        t = text.strip()
-
-        # Drop obvious JSON-like chunks immediately
-        if JSON_LIKELY_RE.search(t):
-            return ""
-
-        # Remove chunk numbering artifacts
-        t = CHUNK_NUMBER_RE.sub("", t)
-
-        # Remove typical prefixes
-        for p in ("Bot:", "bot:", "Assistant:", "assistant:", "assistant-"):
-            if t.startswith(p):
-                t = t[len(p):].lstrip()
-
-        # Strip surrounding quotes/brackets/commas
-        t = t.strip(" \t\n\r,\"'[]{}")
-
-        return t
-
-    def is_suggestion_only(text: str) -> bool:
-        """Return True if the chunk is a pure suggestion/evaluator sentence."""
-        if not text:
-            return True
-        # If chunk starts/ends with quote block or contains many quotes -> likely suggestion
-        if text.startswith('"') or text.endswith('"'):
-            return True
-        # If matches suggestion patterns anywhere -> likely suggestion
-        if SUGGESTION_RE.search(text):
-            # if the chunk also contains concrete user-facing keywords (pharmacy names, phone, 🏪),
-            # we'll treat it as mixed and try to salvage non-suggestion sentences later.
-            return True
-        # very short single tokens like "None" or "OK" considered internal
-        if re.fullmatch(r"(none|ok|true|false|-|—)", text.strip(), re.IGNORECASE):
-            return True
-        return False
-
-    def is_internal_reasoning(text: str) -> bool:
-        """Detect CoT / action / control lines."""
-        if not text:
-            return True
-        if REASONING_RE.search(text):
-            return True
-        if re.fullmatch(r"(action|thought|final answer|none|ok|true|false)\b[:]?.*", text, re.IGNORECASE):
-            return True
-        return False
-
-    def strip_suggestion_sentences(text: str) -> str:
-        """
-        If text mixes useful content with suggestion sentences, remove the
-        suggestion sentences and return the remainder.
-        """
-        # Split into sentences conservatively (punctuation or newline)
-        parts = re.split(r"(?<=[\.\?\!])\s+|\n", text)
-        kept = []
-        for p in parts:
-            p_clean = p.strip()
-            if not p_clean:
-                continue
-            # drop if suggestion-like or JSON-like or internal
-            if JSON_LIKELY_RE.search(p_clean) or SUGGESTION_RE.search(p_clean) or REASONING_RE.search(p_clean):
-                continue
-            kept.append(p_clean)
-        return " ".join(kept).strip()
+    
+    # Instantiate the parser
+    parser = CrewStreamParser()
 
     try:
         while True:
@@ -145,80 +127,46 @@ async def websocket_endpoint(websocket: WebSocket):
                 await websocket.close()
                 break
 
-            q: asyncio.Queue = asyncio.Queue()
+            # Reset parser for new turn
+            parser = CrewStreamParser()
+            queue = asyncio.Queue()
 
-            def run_sync():
-                """Background thread: push raw chunk content into the async queue."""
+            def run_crew():
                 try:
-                    for chunk in crew.kickoff(inputs={"query": query}):
-                        raw = getattr(chunk, "content", None)
-                        if raw is None:
-                            try:
-                                raw = str(chunk)
-                            except Exception:
-                                raw = None
-                        if raw:
-                            asyncio.run_coroutine_threadsafe(q.put(str(raw)), loop)
+                    stream = crew.kickoff(inputs={"query": query})
+                    for chunk in stream:
+                        content = getattr(chunk, "content", str(chunk))
+                        asyncio.run_coroutine_threadsafe(queue.put(content), loop)
                 except Exception as e:
-                    asyncio.run_coroutine_threadsafe(q.put(f"[ERROR]{e}"), loop)
+                    asyncio.run_coroutine_threadsafe(queue.put(f"[ERROR] {e}"), loop)
                 finally:
-                    asyncio.run_coroutine_threadsafe(q.put(None), loop)
+                    asyncio.run_coroutine_threadsafe(queue.put(None), loop)
 
-            threading.Thread(target=run_sync, daemon=True).start()
-
-            send_buffer = ""
-            buffering_final = False
-
-            async def flush_buffer():
-                nonlocal send_buffer
-                if send_buffer:
-                    await websocket.send_text(send_buffer.strip())
-                    send_buffer = ""
+            threading.Thread(target=run_crew, daemon=True).start()
 
             while True:
-                raw_chunk = await q.get()
-                if raw_chunk is None:
-                    await flush_buffer()
+                raw_chunk = await queue.get()
+                
+                if raw_chunk is None: 
+                    # Stream ended. 
+                    # If there's anything left in buffer that wasn't JSON, flush it.
+                    if parser.buffer and not parser.finished:
+                        # Safety check: if buffer looks like just a brace, ignore it
+                        if parser.buffer.strip() != "{":
+                            await websocket.send_text(parser.buffer)
                     break
-
-                # error pass-through
+                
                 if isinstance(raw_chunk, str) and raw_chunk.startswith("[ERROR]"):
-                    await websocket.send_text(raw_chunk)
-                    continue
+                    continue # Skip error logs in stream
 
-                text = sanitize_chunk(str(raw_chunk))
-                if not text:
-                    continue
-
-                # If Final Answer marker present, prefer after it
-                if FINAL_RE.search(text):
-                    buffering_final = True
-                    text = FINAL_RE.split(text)[-1].strip()
-                    if not text:
-                        continue
-
-                # If the whole chunk looks like suggestion/internal -> drop it
-                if is_suggestion_only(text) and not re.search(r"\b(🏪|pharmacy|phone|contact|📞|\d{6,})", text):
-                    # If suggestion-like but contains a phone number / pharmacy emoji, we will try to salvage
-                    continue
-
-                # If mixed (contains suggestion phrases but also real content), strip suggestion sentences
-                if SUGGESTION_RE.search(text) or REASONING_RE.search(text):
-                    stripped = strip_suggestion_sentences(text)
-                    if not stripped:
-                        continue
-                    text = stripped
-
-                # Accumulate for smoother TTS; flush on punctuation or size
-                send_buffer += (" " + text) if send_buffer else text
-                if re.search(r"[.!?]\s*$", text) or len(send_buffer) > 160:
-                    await flush_buffer()
-
-            # end per-query loop
+                # Parse and Send
+                clean_text = parser.process_chunk(str(raw_chunk))
+                if clean_text:
+                    await websocket.send_text(clean_text)
 
     except WebSocketDisconnect:
         print("❌ Client disconnected")
-        
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("server:app", host="0.0.0.0", port=8001, reload=True)
