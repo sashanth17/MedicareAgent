@@ -67,6 +67,7 @@ crew = Crew(
     tasks=[task],
     stream=True,
     memory=True,
+    planning=False,
     embedder=embedder_config
 )
 
@@ -84,7 +85,9 @@ while True:
     streaming = crew.kickoff(inputs={"query": query})
 
     print("Bot: ", end="", flush=True)
+    i=0
     for chunk in streaming:
+        i+=1
         if chunk.content:
-            print(chunk.content, end="", flush=True)
+            print("chunk"+str(i),chunk.content, end="", flush=True)
     print("\n")

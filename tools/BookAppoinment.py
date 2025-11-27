@@ -1,8 +1,8 @@
 from crewai.tools import tool
 import requests
 
-@tool("medicine_tool")
-def medicine_tool(medicine_name: str) -> str:
+@tool("bookDoctor")
+def medicine_tool(doctor_name: str,patien_id:int) -> str:
     """Fetches medicine availability from backend API"""
     try:
         response = requests.get(
