@@ -1,39 +1,61 @@
 from crewai.tools import tool
 import requests
+import json
 
 @tool("bookDoctor")
-def medicine_tool(doctor_name: str,patien_id:int) -> str:
-    """Fetches medicine availability from backend API"""
+def BookAppointment(doctor_name: str, patient_no: str, appointment_date: str, notes: str = "") -> str:
+    """
+    Books an appointment using a doctor's name and a registered patient's phone number.
+    Returns clean booking details if successful.
+    """
     try:
-        response = requests.get(
-            f'https://127.0.0.1:8000/medicines/search/?q={medicine_name}',
-            verify=False  # skip SSL verification for local dev
+        payload = {
+            "doctor_name": doctor_name,
+            "phone_number": patient_no,
+            "appointment_date": appointment_date,
+            "notes": notes
+        }
+
+        response = requests.post(
+            "https://127.0.0.1:8000/appointments/book/",
+            data=json.dumps(payload),
+            headers={"Content-Type": "application/json"},
+            verify=False
         )
 
-        if response.status_code != 200:
-            return f"Sorry! Couldn't fetch availability for {medicine_name}."
+        # Debug support
+        print("DEBUG Response:", response.text)
 
-        data = response.json()
-        medicine_info = data.get("medicine_found", {})
-
-        if not medicine_info:
-            return f"⚠️ {medicine_name} is currently not found in the database."
-
-        instances = medicine_info.get("instances", [])
-        if not instances:
-            return f"⚠️ {medicine_name} is currently not available in nearby pharmacies."
-
-        result = f"🩺 Availability for **{medicine_info.get('medicine_name', medicine_name).title()}**:\n\n"
-
-        for store in instances:
-            pharmacy = store.get("pharmacy", {})
-            result += (
-                f"pharmacy_name :{pharmacy.get('pharmacy_name', 'Unknown Pharmacy')}\n"
-                f"location :{pharmacy.get('location', 'Unknown Location')}\n"
-                f"contact_no :{pharmacy.get('contact_no', 'N/A')}\n"
+        if response.status_code != 201:
+            return (
+                "Booking Failed\n"
+                "Doctor's appointment is currently not available.\n"
+                f"Details: {response.text}"
             )
 
-        return result.strip()
+        data = response.json()
+
+        if not isinstance(data, dict):
+            return (
+                "Booking Failed\n"
+                "Unexpected response format from backend.\n"
+                f"Details: {data}"
+            )
+
+        return (
+            "Booking Successful\n"
+            f"Appointment ID: {data.get('id', 'N/A')}\n"
+            f"Doctor: {data.get('doctor_name', 'N/A')}\n"
+            f"Patient: {data.get('patient_username', patient_no)}\n"
+            f"Date: {data.get('appointment_date', 'N/A')}\n"
+            f"Appointment Number: {data.get('appointment_number', 'N/A')}\n"
+            f"Status: {data.get('status', 'N/A')}\n"
+            f"Notes: {data.get('notes', 'None')}"
+        )
 
     except Exception as e:
-        return f"❌ Error contacting backend: {str(e)}"
+        return (
+            "Booking Failed\n"
+            f"Error: {str(e)}\n"
+            "Doctor's appointment is currently not available."
+        )

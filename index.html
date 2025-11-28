@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CrewAI Voice Stream</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <style>
+        /* Custom Scrollbar for dark theme */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #0f172a; 
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #334155; 
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #475569; 
+        }
+        
+        .message-enter {
+            animation: slideIn 0.3s ease-out forwards;
+        }
+        
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .pulse-ring {
+            animation: pulse-ring 2s cubic-bezier(0.215, 0.61, 0.355, 1) infinite;
+        }
+        
+        @keyframes pulse-ring {
+            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+            70% { transform: scale(1); box-shadow: 0 0 0 20px rgba(239, 68, 68, 0); }
+            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+        }
+    </style>
+</head>
+<body class="bg-slate-900 text-slate-100 font-sans h-screen flex flex-col overflow-hidden">
+
+    <!-- Header -->
+    <header class="flex items-center justify-between p-4 border-b border-slate-700 bg-slate-800/50 backdrop-blur-md z-10">
+        <div class="flex items-center gap-3">
+            <div class="p-2 bg-indigo-600 rounded-lg shadow-lg shadow-indigo-500/20">
+                <i data-lucide="radio" class="w-5 h-5 text-white"></i>
+            </div>
+            <div>
+                <h1 class="font-bold text-lg tracking-tight">CrewAI Voice Stream</h1>
+                <div class="flex items-center gap-2 text-xs">
+                    <span id="connection-dot" class="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span>
+                    <span id="connection-text" class="text-slate-400">Connecting...</span>
+                </div>
+            </div>
+        </div>
+        <button onclick="stopSpeaking()" class="p-2 hover:bg-slate-700 rounded-full transition-colors text-slate-400 hover:text-white" title="Stop Speaking">
+            <i data-lucide="volume-x" class="w-5 h-5"></i>
+        </button>
+    </header>
+
+    <!-- Chat Area -->
+    <main id="chat-container" class="flex-1 overflow-y-auto p-4 space-y-6 scroll-smooth relative">
+        <!-- Empty State -->
+        <div id="empty-state" class="absolute inset-0 flex flex-col items-center justify-center text-slate-500 space-y-4 opacity-50 pointer-events-none">
+            <i data-lucide="terminal" class="w-12 h-12"></i>
+            <p>Ready for voice interaction...</p>
+        </div>
+        
+        <!-- Messages will be injected here -->
+    </main>
+
+    <!-- Input Area -->
+    <footer class="p-4 bg-slate-900 border-t border-slate-800 z-10">
+        <div class="max-w-3xl mx-auto flex flex-col items-center gap-4">
+            
+            <!-- Status Text -->
+            <div id="status-indicator" class="h-6 flex items-center justify-center text-sm font-medium">
+                <!-- Dynamic status content -->
+            </div>
+
+            <!-- Controls -->
+            <div class="w-full flex items-center gap-3">
+                <button id="mic-btn" class="p-4 rounded-full transition-all duration-300 shadow-lg flex items-center justify-center bg-indigo-600 hover:bg-indigo-700 text-white shadow-indigo-500/20 relative">
+                    <i data-lucide="mic" class="w-6 h-6 relative z-10"></i>
+                </button>
+
+                <div class="flex-1 relative">
+                    <input type="text" id="text-input" placeholder="Type a message or click mic..." 
+                        class="w-full bg-slate-800 border-none text-white placeholder-slate-500 rounded-full py-3.5 px-6 focus:ring-2 focus:ring-indigo-500/50 outline-none transition-all">
+                    <button id="send-btn" class="absolute right-2 top-1.5 p-2 bg-slate-700 rounded-full text-slate-300 hover:text-white transition-colors">
+                        <i data-lucide="send" class="w-4 h-4"></i>
+                    </button>
+                </div>
+            </div>
+
+            <p class="text-xs text-slate-600">Server: ws://localhost:8000/ws</p>
+        </div>
+    </footer>
+
+    <script>
+        // --- Configuration ---
+        const WS_URL = "ws://localhost:8001/ws";
+        const SILENCE_TIMEOUT_MS = 1500;
+
+        // --- State ---
+        let ws = null;
+        let recognition = null;
+        let silenceTimer = null;
+        let ttsBuffer = '';
+        let isSpeaking = false;
+        let currentStatus = 'idle'; // idle, listening, processing, speaking
+        let currentAiMessageDiv = null; // To append streaming text to the same bubble
+
+        // --- Elements ---
+        const chatContainer = document.getElementById('chat-container');
+        const emptyState = document.getElementById('empty-state');
+        const micBtn = document.getElementById('mic-btn');
+        const textInput = document.getElementById('text-input');
+        const sendBtn = document.getElementById('send-btn');
+        const statusIndicator = document.getElementById('status-indicator');
+        const connectionDot = document.getElementById('connection-dot');
+        const connectionText = document.getElementById('connection-text');
+
+        // Initialize Icons
+        lucide.createIcons();
+
+        // --- WebSocket ---
+        function connectWebSocket() {
+            ws = new WebSocket(WS_URL);
+
+            ws.onopen = () => {
+                connectionDot.className = "w-2 h-2 rounded-full bg-emerald-400";
+                connectionText.innerText = "System Online";
+                console.log("WebSocket Connected");
+            };
+
+            ws.onclose = () => {
+                connectionDot.className = "w-2 h-2 rounded-full bg-red-500 animate-pulse";
+                connectionText.innerText = "Disconnected (Retrying...)";
+                setTimeout(connectWebSocket, 3000);
+            };
+
+            ws.onerror = (err) => {
+                console.error("WebSocket Error:", err);
+            };
+
+            ws.onmessage = (event) => {
+                const chunk = event.data;
+                handleIncomingChunk(chunk);
+            };
+        }
+
+        // --- Speech Recognition (STT) ---
+        function initSpeechRecognition() {
+            if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+                alert("Browser not supported. Please use Chrome.");
+                return;
+            }
+            
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            recognition = new SpeechRecognition();
+            recognition.continuous = true;
+            recognition.interimResults = true;
+            recognition.lang = 'en-US';
+
+            recognition.onstart = () => {
+                updateStatus('listening');
+                textInput.value = '';
+                micBtn.classList.remove('bg-indigo-600', 'hover:bg-indigo-700');
+                micBtn.classList.add('bg-red-500', 'hover:bg-red-600', 'pulse-ring');
+                micBtn.innerHTML = '<i data-lucide="stop-circle" class="w-6 h-6 relative z-10"></i>';
+                lucide.createIcons();
+            };
+
+            recognition.onend = () => {
+                // Return to idle state visually if we aren't processing
+                if (currentStatus === 'listening') {
+                    updateStatus('idle');
+                }
+                resetMicButton();
+            };
+
+            recognition.onresult = (event) => {
+                let interimTranscript = '';
+                let finalTranscript = '';
+
+                for (let i = event.resultIndex; i < event.results.length; ++i) {
+                    if (event.results[i].isFinal) {
+                        finalTranscript += event.results[i][0].transcript;
+                    } else {
+                        interimTranscript += event.results[i][0].transcript;
+                    }
+                }
+
+                const currentText = finalTranscript || interimTranscript;
+                textInput.value = currentText;
+
+                // Silence Detection Logic
+                clearTimeout(silenceTimer);
+                if (currentText.trim().length > 0) {
+                    silenceTimer = setTimeout(() => {
+                        stopListeningAndSend(currentText);
+                    }, SILENCE_TIMEOUT_MS);
+                }
+            };
+        }
+
+        function toggleListening() {
+            if (currentStatus === 'listening') {
+                stopListeningAndSend(textInput.value);
+            } else {
+                if(!recognition) initSpeechRecognition();
+                recognition.start();
+            }
+        }
+
+        function stopListeningAndSend(text) {
+            if (recognition) recognition.stop();
+            clearTimeout(silenceTimer);
+            sendMessage(text);
+        }
+
+        function resetMicButton() {
+            micBtn.classList.remove('bg-red-500', 'hover:bg-red-600', 'pulse-ring');
+            micBtn.classList.add('bg-indigo-600', 'hover:bg-indigo-700');
+            micBtn.innerHTML = '<i data-lucide="mic" class="w-6 h-6 relative z-10"></i>';
+            lucide.createIcons();
+        }
+
+        // --- Text to Speech (TTS) ---
+        function handleIncomingChunk(chunk) {
+            updateStatus('speaking');
+            
+            // 1. Update UI
+            if (!currentAiMessageDiv) {
+                currentAiMessageDiv = createMessageElement('ai');
+                emptyState.style.display = 'none';
+            }
+            
+            // Append text to the existing AI message bubble
+            const textSpan = currentAiMessageDiv.querySelector('.msg-text');
+            textSpan.textContent += chunk;
+            scrollToBottom();
+
+            // 2. Handle Audio Buffer
+            ttsBuffer += chunk;
+            processTTSBuffer();
+        }
+
+        function processTTSBuffer() {
+            const sentenceRegex = /([.?!]+[\s\n])/; 
+            
+            if (sentenceRegex.test(ttsBuffer)) {
+                const parts = ttsBuffer.split(sentenceRegex);
+                
+                let textToSpeak = '';
+                // Combine parts to form complete sentences
+                for (let i = 0; i < parts.length - 1; i+=2) {
+                    textToSpeak += parts[i] + (parts[i+1] || '');
+                }
+                
+                // Keep the remainder in buffer
+                ttsBuffer = parts[parts.length - 1];
+
+                if (textToSpeak.trim()) {
+                    speakText(textToSpeak);
+                }
+            }
+        }
+
+        function speakText(text) {
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.rate = 1.1;
+            
+            utterance.onstart = () => {
+                isSpeaking = true;
+                updateStatus('speaking');
+            };
+
+            utterance.onend = () => {
+                if (!window.speechSynthesis.pending) {
+                    // Check if we have leftovers (flush)
+                    if (ttsBuffer.trim()) {
+                        const leftover = ttsBuffer;
+                        ttsBuffer = '';
+                        speakText(leftover);
+                    } else {
+                        isSpeaking = false;
+                        updateStatus('idle');
+                        currentAiMessageDiv = null; // Reset for next turn
+                    }
+                }
+            };
+            
+            window.speechSynthesis.speak(utterance);
+        }
+
+        function stopSpeaking() {
+            window.speechSynthesis.cancel();
+            ttsBuffer = '';
+            isSpeaking = false;
+            updateStatus('idle');
+            currentAiMessageDiv = null;
+        }
+
+        // --- UI & Logic ---
+        function sendMessage(text) {
+            if (!text || !text.trim()) return;
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                alert("WebSocket not connected!");
+                return;
+            }
+
+            // User UI
+            emptyState.style.display = 'none';
+            const userMsg = createMessageElement('user');
+            userMsg.querySelector('.msg-text').textContent = text;
+            
+            // Send
+            ws.send(text);
+            
+            // Reset
+            textInput.value = '';
+            ttsBuffer = '';
+            updateStatus('processing');
+            currentAiMessageDiv = null; // Ensure new bubble for AI response
+            scrollToBottom();
+        }
+
+        function createMessageElement(sender) {
+            const wrapper = document.createElement('div');
+            wrapper.className = `flex items-start gap-4 max-w-3xl mx-auto message-enter ${sender === 'user' ? 'flex-row-reverse' : ''}`;
+            
+            const avatar = document.createElement('div');
+            avatar.className = `w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${sender === 'user' ? 'bg-slate-700' : 'bg-indigo-600'}`;
+            avatar.innerHTML = `<i data-lucide="${sender === 'user' ? 'user' : 'bot'}" class="w-4 h-4 text-white"></i>`;
+            
+            const bubble = document.createElement('div');
+            bubble.className = `p-4 rounded-2xl text-sm leading-relaxed shadow-sm ${sender === 'user' ? 'bg-slate-800 text-slate-200 rounded-tr-none' : 'bg-white/5 text-slate-200 rounded-tl-none border border-white/5'}`;
+            
+            const textSpan = document.createElement('span');
+            textSpan.className = 'msg-text';
+            
+            bubble.appendChild(textSpan);
+            wrapper.appendChild(avatar);
+            wrapper.appendChild(bubble);
+            chatContainer.appendChild(wrapper);
+            
+            lucide.createIcons();
+            return wrapper;
+        }
+
+        function updateStatus(status) {
+            currentStatus = status;
+            let html = '';
+            
+            if (status === 'listening') {
+                html = `<span class="flex items-center gap-2 text-indigo-400 animate-pulse">
+                            <span class="relative flex h-3 w-3">
+                                <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
+                                <span class="relative inline-flex rounded-full h-3 w-3 bg-indigo-500"></span>
+                            </span>
+                            Listening... (Pause to send)
+                        </span>`;
+            } else if (status === 'processing') {
+                html = `<span class="text-emerald-400 animate-pulse">Processing request...</span>`;
+            } else if (status === 'speaking') {
+                html = `<span class="text-blue-400 flex items-center gap-2"><i data-lucide="volume-2" class="w-4 h-4"></i> Speaking...</span>`;
+            }
+            
+            statusIndicator.innerHTML = html;
+            lucide.createIcons();
+        }
+
+        function scrollToBottom() {
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        // --- Event Listeners ---
+        micBtn.addEventListener('click', toggleListening);
+        sendBtn.addEventListener('click', () => sendMessage(textInput.value));
+        textInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') sendMessage(textInput.value);
+        });
+
+        // Start
+        connectWebSocket();
+        initSpeechRecognition();
+
+    </script>
+</body>
+</html>

@@ -1,6 +1,6 @@
 from crewai import LLM, Agent, Crew, Task
 from tools.medicine import medicine_tool
-
+from tools.BookAppoinment import BookAppointment
 # Initialize LLM
 llm = LLM(
     model="gemini/gemini-2.0-flash",
@@ -24,14 +24,14 @@ class CrewInit:
                 "You value accuracy above all else. "
                 "You never add pleasantries or filler text before the final answer."
             ),
-            tools=[medicine_tool],
+            tools=[medicine_tool,BookAppointment],
             max_iter=3,
             verbose=False, # Keep false to reduce noise, though stream=True overrides this often
             allow_delegation=False
         )
 
         # ----------------- TASK -----------------
-        task = Task(
+        task1 = Task(
             description=(
                 f"User Query: '{{query}}'\n\n"
                 "STEPS:\n"
@@ -50,13 +50,36 @@ class CrewInit:
             ),
             agent=agent
         )
+        task2 = Task(
+    description=(
+        f"User Query: '{{query}}'\n\n"
+        "STEPS:\n"
+        "1. Analyze if the user is asking to book a doctor's appointment.\n"
+        "2. IF YES:\n"
+        "   - Extract doctor name, patient phone number, appointment date, and optional notes.\n"
+        "   - Use 'bookDoctor' tool with extracted details.\n"
+        "3. IF NO: Respond politely that you can help with doctor appointment bookings.\n\n"
+        "CRITICAL OUTPUT RULES:\n"
+        "- You MUST start your final response with: 'Final Answer:'.\n"
+        "- If tool booking is successful, clearly present appointment details: Appointment ID, Doctor, Date, Status.\n"
+        "- If booking fails or no slots available, clearly state that doctor's appointment is currently not available.\n"
+        "- DO NOT include 'Thought:', 'Action:', stack traces, or raw JSON in Final Answer.\n"
+        "- Keep responses short, clean, and professional."
+    ),
+    expected_output=(
+        "A formatted appointment confirmation or unavailability message starting after 'Final Answer:'.\n"
+        "Example Success: 'Final Answer: Your appointment with Dr. Soundar D on 2025-11-30 is booked successfully. Appointment ID: 1, Appointment Number: 1.'\n"
+        "Example Failure: 'Final Answer: Doctor’s appointment is currently not available.'"
+    ), 
+    agent=agent
+    )
 
         # ----------------- CREW -----------------
         # Note: memory=True appends the JSON reflection block. 
         # Our server.py is now equipped to strip this out automatically.
         crew = Crew(
             agents=[agent],
-            tasks=[task],
+            tasks=[task1,task2],
             stream=True, 
             memory=True, 
             embedder={
